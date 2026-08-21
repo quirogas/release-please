@@ -328,7 +328,6 @@ export class Manifest {
   private bootstrapSha?: string;
   private lastReleaseSha?: string;
   private draft?: boolean;
-  private prerelease?: boolean;
   private draftPullRequest?: boolean;
   private groupPullRequestTitlePattern?: string;
   readonly releaseSearchDepth: number;
@@ -923,7 +922,7 @@ export class Manifest {
    *
    * @returns {PullRequest[]} Pull request numbers of release pull requests
    */
-  async createPullRequests(): Promise<(PullRequest | undefined)[]> {
+  async createPullRequests(): Promise<PullRequest[]> {
     const candidatePullRequests = await this.buildPullRequests();
     if (candidatePullRequests.length === 0) {
       return [];
@@ -967,7 +966,7 @@ export class Manifest {
       }
       const pullNumbers = await Promise.all(promises);
       // reject any pull numbers that were not created or updated
-      return pullNumbers.filter(number => !!number);
+      return pullNumbers.filter((pr): pr is PullRequest => !!pr);
     }
   }
 
@@ -1090,28 +1089,72 @@ export class Manifest {
     return newPullRequest;
   }
 
-  /// only update an existing pull request if it has release note changes
+  /**
+   * Normalizes pull request body content by converting CRLF (\r\n) and CR (\r) line endings
+   * to standard LF (\n) and trimming leading/trailing whitespace. This prevents false-positive
+   * diffs caused by GitHub's markdown normalization during API round-trips.
+   *
+   * @param {string | undefined | null} body The raw pull request body text
+   * @returns {string} The normalized body string
+   */
+  private normalizePullRequestBody(body: string | undefined | null): string {
+    return (body ?? '').replace(/\r\n|\r/g, '\n').trim();
+  }
+
+  /**
+   * Checks whether an existing pull request has identical release note content
+   * compared to a newly computed candidate release pull request.
+   *
+   * @param {PullRequest} existing The existing open or snoozed pull request
+   * @param {ReleasePullRequest} pullRequest The computed candidate pull request
+   * @returns {boolean} True if the normalized release note bodies are identical
+   */
+  private isPullRequestUnchanged(
+    existing: PullRequest,
+    pullRequest: ReleasePullRequest
+  ): boolean {
+    const existingBody = this.normalizePullRequestBody(existing.body);
+    const candidateBody = this.normalizePullRequestBody(
+      pullRequest.body?.toString()
+    );
+    return existingBody === candidateBody;
+  }
+
+  /**
+   * Only update an existing pull request if it has release note changes.
+   *
+   * @param {PullRequest} existing The existing open release pull request
+   * @param {ReleasePullRequest} pullRequest The newly computed candidate pull request
+   * @returns {Promise<PullRequest | undefined>} The updated pull request, or undefined if skipped
+   */
   private async maybeUpdateExistingPullRequest(
     existing: PullRequest,
     pullRequest: ReleasePullRequest
   ): Promise<PullRequest | undefined> {
     // If unchanged, no need to push updates
-    if (existing.body === pullRequest.body.toString()) {
+    if (this.isPullRequestUnchanged(existing, pullRequest)) {
       this.logger.info(
         `PR https://github.com/${this.repository.owner}/${this.repository.repo}/pull/${existing.number} remained the same`
       );
       return undefined;
     }
-    return await this.updateExistingPullRequest(existing, pullRequest);
+    return this.updateExistingPullRequest(existing, pullRequest);
   }
 
-  /// only update a snoozed pull request if it has release note changes
+  /**
+   * Only update a snoozed pull request if it has release note changes.
+   * If updated, the snooze label is removed.
+   *
+   * @param {PullRequest} snoozed The existing snoozed release pull request
+   * @param {ReleasePullRequest} pullRequest The newly computed candidate pull request
+   * @returns {Promise<PullRequest | undefined>} The updated pull request, or undefined if skipped
+   */
   private async maybeUpdateSnoozedPullRequest(
     snoozed: PullRequest,
     pullRequest: ReleasePullRequest
   ): Promise<PullRequest | undefined> {
     // If unchanged, no need to push updates
-    if (snoozed.body === pullRequest.body.toString()) {
+    if (this.isPullRequestUnchanged(snoozed, pullRequest)) {
       this.logger.info(
         `PR https://github.com/${this.repository.owner}/${this.repository.repo}/pull/${snoozed.number} remained the same`
       );
@@ -1126,7 +1169,13 @@ export class Manifest {
     return updatedPullRequest;
   }
 
-  /// force an update to an existing pull request
+  /**
+   * Force an update to an existing pull request.
+   *
+   * @param {PullRequest} existing The existing pull request
+   * @param {ReleasePullRequest} pullRequest The updated release pull request data
+   * @returns {Promise<PullRequest>} The updated pull request
+   */
   private async updateExistingPullRequest(
     existing: PullRequest,
     pullRequest: ReleasePullRequest
@@ -1143,6 +1192,11 @@ export class Manifest {
     );
   }
 
+  /**
+   * Generator that yields merged release pull requests on the target branch.
+   *
+   * @yields {PullRequest} Merged release pull requests matching release labels
+   */
   private async *findMergedReleasePullRequests() {
     // Find merged release pull requests
     const pullRequestGenerator = this.github.pullRequestIterator(
@@ -1184,7 +1238,7 @@ export class Manifest {
     const strategiesByPath = await this.getStrategiesByPath();
 
     // Find merged release pull requests
-    const generator = await this.findMergedReleasePullRequests();
+    const generator = this.findMergedReleasePullRequests();
     const candidateReleases: CandidateRelease[] = [];
     for await (const pullRequest of generator) {
       for (const path in this.repositoryConfig) {

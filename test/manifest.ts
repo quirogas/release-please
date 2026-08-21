@@ -4280,6 +4280,70 @@ describe('Manifest', () => {
       expect(pullRequestNumbers).lengthOf(1);
     });
 
+    it('skips updating an existing pull request if the body only differs by line endings or whitespace', async () => {
+      const body = new PullRequestBody(
+        [
+          {
+            component: 'pkg1',
+            version: Version.parse('1.0.0'),
+            notes: 'Some release notes',
+          },
+        ],
+        {useComponents: true}
+      );
+      const existingBodyWithCRLF =
+        body.toString().replace(/\n/g, '\r\n') + '  \r\n';
+      const branchName = 'release-please/branches/main';
+      mockPullRequests(
+        github,
+        [
+          {
+            number: 22,
+            title: 'chore: release main',
+            body: existingBodyWithCRLF,
+            headBranchName: branchName,
+            baseBranchName: 'main',
+            labels: ['autorelease: pending'],
+            files: [],
+          },
+        ],
+        []
+      );
+      const updatePullRequestStub = sandbox.stub(github, 'updatePullRequest');
+      const createPullRequestStub = sandbox.stub(github, 'createPullRequest');
+      const manifest = new Manifest(
+        github,
+        'main',
+        {
+          'path/a': {
+            releaseType: 'node',
+            component: 'pkg1',
+          },
+        },
+        {
+          'path/a': Version.parse('1.0.0'),
+        },
+        {
+          separatePullRequests: true,
+          plugins: ['node-workspace'],
+        }
+      );
+      sandbox.stub(manifest, 'buildPullRequests').resolves([
+        {
+          title: PullRequestTitle.ofTargetBranch('main'),
+          body,
+          updates: [],
+          labels: [],
+          headRefName: branchName,
+          draft: false,
+        },
+      ]);
+      const pullRequestNumbers = await manifest.createPullRequests();
+      expect(pullRequestNumbers).lengthOf(0);
+      sinon.assert.notCalled(updatePullRequestStub);
+      sinon.assert.notCalled(createPullRequestStub);
+    });
+
     describe('with an overflowing body', () => {
       const body = new PullRequestBody(mockReleaseData(1000), {
         useComponents: true,
@@ -4825,6 +4889,79 @@ describe('Manifest', () => {
       ]);
       const pullRequestNumbers = await manifest.createPullRequests();
       expect(pullRequestNumbers).lengthOf(0);
+    });
+
+    it('skips updating a snoozed pull request if the body only differs by line endings or whitespace', async () => {
+      const body = new PullRequestBody([
+        {
+          notes: '## 1.1.0\n\nSome release notes',
+        },
+      ]);
+      const existingBodyWithCRLF =
+        body.toString().replace(/\n/g, '\r\n') + '  \r\n';
+      sandbox
+        .stub(github, 'getFileContentsOnBranch')
+        .withArgs('README.md', 'main')
+        .resolves(buildGitHubFileRaw('some-content'));
+      mockPullRequests(
+        github,
+        [],
+        [],
+        [
+          {
+            number: 22,
+            title: 'pr title1',
+            body: existingBodyWithCRLF,
+            headBranchName: 'release-please/branches/main',
+            baseBranchName: 'main',
+            labels: ['autorelease: closed', 'autorelease: snooze'],
+            files: [],
+          },
+        ]
+      );
+      const manifest = new Manifest(
+        github,
+        'main',
+        {
+          'path/a': {
+            releaseType: 'node',
+            component: 'pkg1',
+          },
+        },
+        {
+          'path/a': Version.parse('1.0.0'),
+        },
+        {
+          separatePullRequests: true,
+          plugins: ['node-workspace'],
+        }
+      );
+      sandbox.stub(manifest, 'buildPullRequests').resolves([
+        {
+          title: PullRequestTitle.ofTargetBranch('main'),
+          body,
+          updates: [
+            {
+              path: 'README.md',
+              createIfMissing: false,
+              updater: new RawContent('some raw content'),
+            },
+          ],
+          labels: [],
+          headRefName: 'release-please/branches/main',
+          draft: false,
+        },
+      ]);
+      const removeLabelsStub = sandbox
+        .stub(github, 'removeIssueLabels')
+        .resolves();
+      const updatePullRequestStub = sandbox
+        .stub(github, 'updatePullRequest')
+        .resolves();
+      const pullRequestNumbers = await manifest.createPullRequests();
+      expect(pullRequestNumbers).lengthOf(0);
+      sinon.assert.notCalled(removeLabelsStub);
+      sinon.assert.notCalled(updatePullRequestStub);
     });
   });
 
