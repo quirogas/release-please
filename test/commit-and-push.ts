@@ -44,6 +44,10 @@ type CreateCommitResponse = GetResponseTypeFromEndpointMethod<
   typeof octokit.git.createCommit
 >;
 
+type GetRefResponse = GetResponseTypeFromEndpointMethod<
+  typeof octokit.git.getRef
+>;
+
 class FakeCommitSigner implements CommitSigner {
   signature: string;
   constructor(signature: string) {
@@ -299,6 +303,9 @@ describe('Commit and push function', async () => {
   afterEach(() => {
     sandbox.restore();
   });
+  beforeEach(() => {
+    changes.clear();
+  });
   it('When everything works it calls functions with correct parameter values', async () => {
     changes.set('foo.txt', {
       mode: '100755',
@@ -502,5 +509,157 @@ describe('Commit and push function', async () => {
     sinon.assert.calledTwice(createTreeStub);
     sinon.assert.calledTwice(createCommitStub);
     sinon.assert.calledOnce(updateRefStub);
+  });
+
+  it('skips updateRef when the existing branch already has the exact same tree SHA', async () => {
+    changes.set('foo.txt', {
+      mode: '100755',
+      content: 'some file content',
+    });
+    sandbox
+      .stub(octokit.git, 'getCommit')
+      .onFirstCall()
+      .resolves(getCommitResponse)
+      .onSecondCall()
+      .resolves({
+        headers: {},
+        status: 200,
+        url: 'http://fake-url.com',
+        data: {
+          ...commitResponseData,
+          tree: {
+            sha: createTreeResponseData.sha,
+            url: 'http://fake-url.com',
+          },
+        },
+      } as unknown as GetCommitResponse);
+    sandbox.stub(octokit.git, 'createTree').resolves(createTreeResponse);
+    sandbox.stub(octokit.git, 'createCommit').resolves(createCommitResponse);
+    sandbox.stub(octokit.git, 'getRef').resolves({
+      headers: {},
+      status: 200,
+      url: 'http://fake-url.com',
+      data: {
+        ref: 'refs/heads/test-branch-name',
+        node_id: 'MDM6UmVmMTI=',
+        url: 'http://fake-url.com',
+        object: {
+          sha: 'existing-branch-head-sha',
+          type: 'commit',
+          url: 'http://fake-url.com',
+        },
+      },
+    } as unknown as GetRefResponse);
+    const stubUpdateRef = sandbox.stub(octokit.git, 'updateRef');
+
+    await handler.commitAndPush(
+      octokit,
+      oldHeadSha,
+      changes,
+      {branch: branchName, ...origin},
+      message,
+      true
+    );
+
+    sinon.assert.notCalled(stubUpdateRef);
+  });
+
+  it('updates ref when existing branch has a different tree SHA', async () => {
+    changes.set('foo.txt', {
+      mode: '100755',
+      content: 'some file content',
+    });
+    sandbox
+      .stub(octokit.git, 'getCommit')
+      .onFirstCall()
+      .resolves(getCommitResponse)
+      .onSecondCall()
+      .resolves({
+        headers: {},
+        status: 200,
+        url: 'http://fake-url.com',
+        data: {
+          ...commitResponseData,
+          tree: {
+            sha: 'different-tree-sha',
+            url: 'http://fake-url.com',
+          },
+        },
+      } as unknown as GetCommitResponse);
+    sandbox.stub(octokit.git, 'createTree').resolves(createTreeResponse);
+    sandbox.stub(octokit.git, 'createCommit').resolves(createCommitResponse);
+    sandbox.stub(octokit.git, 'getRef').resolves({
+      headers: {},
+      status: 200,
+      url: 'http://fake-url.com',
+      data: {
+        ref: 'refs/heads/test-branch-name',
+        node_id: 'MDM6UmVmMTI=',
+        url: 'http://fake-url.com',
+        object: {
+          sha: 'existing-branch-head-sha',
+          type: 'commit',
+          url: 'http://fake-url.com',
+        },
+      },
+    } as unknown as GetRefResponse);
+    const stubUpdateRef = sandbox.stub(octokit.git, 'updateRef');
+
+    await handler.commitAndPush(
+      octokit,
+      oldHeadSha,
+      changes,
+      {branch: branchName, ...origin},
+      message,
+      true
+    );
+
+    sinon.assert.calledOnce(stubUpdateRef);
+  });
+
+  it('updates ref when getRef returns 404 (new branch)', async () => {
+    changes.set('foo.txt', {
+      mode: '100755',
+      content: 'some file content',
+    });
+    sandbox.stub(octokit.git, 'getCommit').resolves(getCommitResponse);
+    sandbox.stub(octokit.git, 'createTree').resolves(createTreeResponse);
+    sandbox.stub(octokit.git, 'createCommit').resolves(createCommitResponse);
+    sandbox
+      .stub(octokit.git, 'getRef')
+      .rejects(Object.assign(new Error('Not Found'), {status: 404}));
+    const stubUpdateRef = sandbox.stub(octokit.git, 'updateRef');
+
+    await handler.commitAndPush(
+      octokit,
+      oldHeadSha,
+      changes,
+      {branch: branchName, ...origin},
+      message,
+      true
+    );
+
+    sinon.assert.calledOnce(stubUpdateRef);
+  });
+
+  it('handles empty changes map without calling updateRef', async () => {
+    const stubGetCommit = sandbox.stub(octokit.git, 'getCommit');
+    const stubCreateTree = sandbox.stub(octokit.git, 'createTree');
+    const stubCreateCommit = sandbox.stub(octokit.git, 'createCommit');
+    const stubUpdateRef = sandbox.stub(octokit.git, 'updateRef');
+
+    await handler.commitAndPush(
+      octokit,
+      oldHeadSha,
+      new Map(),
+      {branch: branchName, ...origin},
+      message,
+      true
+    );
+
+    sinon.assert.notCalled(stubGetCommit);
+    sinon.assert.notCalled(stubCreateTree);
+    sinon.assert.notCalled(stubCreateCommit);
+    sinon.assert.notCalled(stubUpdateRef);
   });
 });
